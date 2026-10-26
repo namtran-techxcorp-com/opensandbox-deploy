@@ -1,0 +1,42 @@
+# The kind cluster (k8s/kind.yaml): images straight from Docker Hub. configToml is the same as
+# in values-eks.yaml except for the execd and egress image registry.
+
+opensandbox-controller:
+  controller:
+    image:
+      repository: docker.io/opensandbox/controller
+
+opensandbox-server:
+  server:
+    image:
+      repository: docker.io/opensandbox/server
+  configToml: |
+    [server]
+    host = "0.0.0.0"
+    port = 80
+    api_key = ""
+    # Caps `timeout` on create only; a client renews past it.
+    max_sandbox_timeout_seconds = 3600
+
+    [log]
+    level = "INFO"
+
+    [runtime]
+    type = "kubernetes"
+    # Same release as the server and the clients' Python SDK (1.1.1).
+    execd_image = "docker.io/opensandbox/execd:release-1.1.1"
+
+    [kubernetes]
+    # Must equal sandboxNamespace: the server's Role covers this namespace only.
+    namespace = "opensandbox"
+    workload_provider = "batchsandbox"
+    batchsandbox_template_file = "/etc/opensandbox/sandbox-template.yaml"
+    # A fresh node pulls execd, egress and the sandbox image before the pod is ready.
+    sandbox_create_timeout_seconds = 180
+
+    [egress]
+    image = "docker.io/opensandbox/egress:release-1.1.1"
+    # Credential Vault refuses DNS-only enforcement: direct-IP connections would bypass it.
+    mode = "dns+nft"
+    # The CNI is IPv4-only, so execd init needs no privileged step to turn IPv6 off.
+    disable_ipv6 = false

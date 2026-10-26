@@ -1,0 +1,53 @@
+# Values for the OpenSandbox umbrella chart (charts/opensandbox, release-1.1.1 patched by
+# chart.patch) shared by every cluster: CRDs, controller and server on `workload: general` nodes,
+# sandboxes in the `opensandbox` namespace. Images and the server config are per cluster:
+# values-kind.yaml or values-eks.yaml, passed after this file.
+
+base:
+  enabled: true
+  # The fast-sandbox runtime is off, but the server's informers watch its kinds, so its CRDs
+  # stay; its namespaces and RBAC do not.
+  fastSandbox:
+    namespaces:
+      createSystem: false
+      create: false
+    rbac:
+      create: false
+
+opensandbox-controller:
+  controller:
+    nodeSelector:
+      workload: general
+    # Snapshots are not used, so this image is never pulled.
+    snapshot:
+      imageCommitterImage: docker.io/opensandbox/image-committer:release-1.1.1
+
+opensandbox-server:
+  sandboxNamespace: opensandbox
+  server:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    nodeSelector:
+      workload: general
+    # Overrides [server] api_key. Every client sends the same value.
+    env:
+      - name: OPENSANDBOX_SERVER_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: opensandbox-api-key
+            key: api-key
+    # The BatchSandbox template (configmap opensandbox-sandbox-template, manifests.yaml).
+    volumes:
+      - name: sandbox-template
+        configMap:
+          name: opensandbox-sandbox-template
+    volumeMounts:
+      - name: sandbox-template
+        mountPath: /etc/opensandbox/sandbox-template.yaml
+        subPath: sandbox-template.yaml
+        readOnly: true

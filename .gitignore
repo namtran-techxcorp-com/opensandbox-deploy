@@ -1,0 +1,18 @@
+# Local secrets: .env holds the API key used on kind.
+.env
+.env.*
+!.env.example
+
+# make charts clone, port-forward logs; helm dependency build output.
+.run/
+charts/opensandbox/charts/
+*.tgz
+
+# Tooling and editors.
+__pycache__/
+.ruff_cache/
+.venv/
+.idea/
+*.iml
+.vscode/
+.DS_Store

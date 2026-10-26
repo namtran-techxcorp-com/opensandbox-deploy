@@ -1,0 +1,98 @@
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Operational RBAC for the server, held to the sandbox namespace
+# (sandboxNamespace, the [kubernetes] namespace of configToml): pods, pvcs,
+# secrets and CRs there only. The cluster-scoped part is read-only:
+# namespaces and runtimeclasses.
+{{- $sandboxNamespace := required "sandboxNamespace is required" .Values.sandboxNamespace }}
+---
+apiVersion: {{ include "opensandbox-server.rbac.apiVersion" . }}
+kind: Role
+metadata:
+  name: {{ include "opensandbox-server.roleName" . }}
+  namespace: {{ $sandboxNamespace }}
+  labels:
+    {{- include "opensandbox-server.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/status", "pods/log", "events", "services", "configmaps"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete", "get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete", "get", "list", "patch"]
+  - apiGroups: ["sandbox.opensandbox.io"]
+    resources: ["batchsandboxes", "batchsandboxes/status", "batchsandboxes/finalizers"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["sandbox.opensandbox.io"]
+    resources: ["pools", "pools/status", "pools/finalizers"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["sandbox.opensandbox.io"]
+    resources: ["sandboxsnapshots", "sandboxsnapshots/status", "sandboxsnapshots/finalizers"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  # The server's informers watch the fast-sandbox kinds whether or not that runtime is used.
+  - apiGroups: ["sandbox.fast.io"]
+    resources: ["sandboxes", "sandboxsnapshots"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["sandbox.fast.io"]
+    resources: ["sandboxtemplates"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+---
+apiVersion: {{ include "opensandbox-server.rbac.apiVersion" . }}
+kind: RoleBinding
+metadata:
+  name: {{ include "opensandbox-server.fullname" . }}-rolebinding
+  namespace: {{ $sandboxNamespace }}
+  labels:
+    {{- include "opensandbox-server.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "opensandbox-server.roleName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "opensandbox-server.serviceAccountName" . }}
+    namespace: {{ include "opensandbox-server.namespace" . }}
+---
+apiVersion: {{ include "opensandbox-server.rbac.apiVersion" . }}
+kind: ClusterRole
+metadata:
+  name: {{ include "opensandbox-server.roleName" . }}-read
+  labels:
+    {{- include "opensandbox-server.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list"]
+---
+apiVersion: {{ include "opensandbox-server.rbac.apiVersion" . }}
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "opensandbox-server.fullname" . }}-read-rolebinding
+  labels:
+    {{- include "opensandbox-server.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "opensandbox-server.roleName" . }}-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "opensandbox-server.serviceAccountName" . }}
+    namespace: {{ include "opensandbox-server.namespace" . }}

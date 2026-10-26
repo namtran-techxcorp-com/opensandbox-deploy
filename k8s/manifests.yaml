@@ -1,0 +1,107 @@
+# What the chart does not create: both namespaces, the NetworkPolicies, and the BatchSandbox
+# template the server mounts. Apply before the chart. The API key Secret is not here: README,
+# "API key".
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opensandbox-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opensandbox
+  labels:
+    # The egress sidecar adds NET_ADMIN, which Pod Security baseline and restricted refuse.
+    pod-security.kubernetes.io/enforce: privileged
+---
+# The server takes calls on port 80 from client namespaces only: those labelled
+# opensandbox.io/client=true. kubectl port-forward (smoke, kind-forward) does not pass through it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opensandbox-server
+  namespace: opensandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opensandbox-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              opensandbox.io/client: "true"
+      ports:
+        - protocol: TCP
+          port: 80
+---
+# Sandboxes take calls from the server only (execd, the egress sidecar's API) and reach DNS and
+# public hosts on 443. The egress sidecar already narrows that to each sandbox's networkPolicy;
+# this keeps a sandbox off private ranges (the cluster, the VPC) even if the sidecar fails.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandboxes
+  namespace: opensandbox
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: opensandbox-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opensandbox-server
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# The base BatchSandbox: the server merges each sandbox's pod spec into it. Sandboxes run on the
+# sandbox node only, and tolerate its taint and no other.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensandbox-sandbox-template
+  namespace: opensandbox-system
+data:
+  sandbox-template.yaml: |
+    metadata: {}
+    spec:
+      replicas: 1
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            workload: sandbox
+          tolerations:
+            - key: workload
+              operator: Equal
+              value: sandbox
+              effect: NoSchedule
