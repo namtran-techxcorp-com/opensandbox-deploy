@@ -119,7 +119,14 @@ repo creates that Secret on a real cluster. Any long random string works
 ## Deploy
 
 The chart is vendored in `charts/` (umbrella `charts/opensandbox`, with local `file://`
-dependencies on its sibling charts), so it installs from this repo with no download.
+dependencies on its sibling charts), so it installs from this repo with no download. It is the
+official OpenSandbox chart: `manifests/charts` at tag
+[`release-1.1.1`](https://github.com/opensandbox-group/OpenSandbox/tree/release-1.1.1/manifests/charts)
+of the upstream repo, which publishes no Helm repository, with `k8s/chart.patch` applied. The
+patch changes three files, all RBAC (see Permissions): `charts/server/templates/rbac.yaml`,
+`charts/server/values.yaml` and `charts/controller/templates/clusterrole.yaml`. Every other file
+is as upstream ships it; `make charts` rebuilds `charts/` from the tag and the patch (see
+Changing the release).
 
 Install only the umbrella chart, `charts/opensandbox`: it pulls in the others and turns three of
 them off. The disabled ones stay in `charts/` only because the umbrella lists them as
