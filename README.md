@@ -2,15 +2,16 @@
 
 Deploys [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) **1.1.1** on Kubernetes:
 on `techx-xora-nonprod-eks`, and on a local kind cluster shaped like it to try changes first.
-This README is the hand-off to whoever deploys it on EKS.
+This README is the hand-off to whoever deploys it on EKS. Owner: Nam Tran
+(nam.tran@techxcorp.com).
 
 ## What it is
 
 OpenSandbox runs short-lived sandbox pods for Xora services. A client asks the server for a
 sandbox with an image and an egress allow-list, then runs commands and code in it. Each sandbox
 pod adds two things to the client's image: `execd`, copied in by an init container, which runs
-the commands, and an `egress` sidecar, which enforces the allow-list and can inject credentials into outbound requests (the Credential
-Vault), so a token never enters the sandbox.
+the commands, and an `egress` sidecar, which enforces the allow-list and can inject credentials
+into outbound requests (the Credential Vault), so a token never enters the sandbox.
 
 The first client is `xora-sandbox`, which runs `gh`, `git` and the AWS CLI for a tenant;
 `xora-gateway` takes its place later. Clients bring their own sandbox images.
@@ -59,7 +60,8 @@ must also be in a registry the sandbox nodes can pull from. The client names it 
    `infra-xora-platform` takes labels but no taints, so this needs an infra change. To run on
    `general-arm64` instead, remove `nodeSelector` and `tolerations` from that ConfigMap.
 2. **Sizing.** A client that sets no resources gets the SDK default: a limit of 1 CPU and 2 GiB
-   per sandbox, with no request, so Kubernetes reserves the same as the request. On an
+   per sandbox and no request, so Kubernetes sets the request equal to the limit and reserves
+1 CPU and 2 GiB per sandbox. On an
    m7g.xlarge (3920m allocatable, 480m of DaemonSets) that is three sandboxes per node.
    `xora-sandbox` keeps one sandbox per tenant + environment, alive 5 minutes after its last
    command. Server: 100m / 256Mi request; controller: 10m / 64Mi.
@@ -119,9 +121,23 @@ repo creates that Secret on a real cluster. Any long random string works
 The chart is vendored in `charts/` (umbrella `charts/opensandbox`, with local `file://`
 dependencies on its sibling charts), so it installs from this repo with no download.
 
+Install only the umbrella chart, `charts/opensandbox`: it pulls in the others and turns three of
+them off. The disabled ones stay in `charts/` only because the umbrella lists them as
+dependencies, and `helm dependency build` fails without them.
+
+| Chart | Deployed | Creates |
+|---|---|---|
+| `charts/opensandbox` | Yes: the one to install | Nothing itself; brings in the charts below |
+| `charts/base` | Yes | The CRDs: `sandbox.opensandbox.io` and the `sandbox.fast.io` kinds the server watches; the nine unbound CRD access ClusterRoles |
+| `charts/controller` | Yes | `opensandbox-controller-manager`: Deployment, service account, ClusterRole, leader-election Role |
+| `charts/server` | Yes | `opensandbox-server`: Deployment, Service, service account, ConfigMap with `configToml`, Role in `opensandbox`, read-only ClusterRole |
+| `charts/fast-sandbox` | No (`fast-sandbox.enabled: false`) | The fast-sandbox (Firecracker) control plane and node runtime: another runtime, not used |
+| `charts/ingress-gateway` | No (`ingress-gateway.enabled: false`) | The OpenSandbox ingress gateway, not used: clients go through the server |
+| `charts/node-agent` | No (`opensandbox-node-agent.enabled: false`) | A DaemonSet for node-level sandbox data collection, not used |
+
 1. Mirror the images (above) and adjust `k8s/values-eks.yaml` if the paths differ.
-2. Create the Secret `opensandbox-api-key`.
-3. Apply `k8s/manifests.yaml`: namespaces, NetworkPolicies, sandbox template.
+2. Apply `k8s/manifests.yaml`: namespaces, NetworkPolicies, sandbox template.
+3. Create the Secret `opensandbox-api-key` in `opensandbox-system` (above).
 4. Install the chart, release `opensandbox`, namespace `opensandbox-system`, values
    `k8s/values.yaml` then `k8s/values-eks.yaml`:
 
@@ -132,8 +148,10 @@ dependencies on its sibling charts), so it installs from this repo with no downl
    ```
 
    The same through the Makefile: `make install KUBE_CONTEXT=<context> VALUES=k8s/values-eks.yaml`
-   (steps 3 and 4). `make render VALUES=k8s/values-eks.yaml` prints every manifest the cluster
-   gets, for review or for a GitOps repo.
+   (steps 2 and 4). `make render VALUES=k8s/values-eks.yaml` prints every manifest the cluster
+   gets, for review or for a GitOps repo. With ArgoCD, an Application on `charts/opensandbox`
+   with both values files works only if ArgoCD builds the chart's `file://` dependencies;
+   otherwise commit the output of `make render` instead.
 5. Label the client namespaces `opensandbox.io/client=true`.
 6. Verify (below).
 
@@ -142,25 +160,59 @@ server's Role covers that namespace only.
 
 ## Verify
 
+The deploy is done when all three pass, in this order. Run them from a clone of this repo on
+a machine with `make`, `kubectl` and [`uv`](https://docs.astral.sh/uv/) (it fetches Python 3.11
+and the OpenSandbox SDK itself), and `kubectl` access to the cluster (the EKS API is private:
+from the VPC or through WARP). `SMOKE_IMAGE` is any image with `sh` and `curl` the nodes can
+pull (the default, `curlimages/curl:8.10.1`, is on Docker Hub), and the sandbox nodes need
+egress to `postman-echo.com`.
+
 ```bash
-make smoke KUBE_CONTEXT=<context> SMOKE_IMAGE=<an image with sh and curl the nodes can pull>
-make check KUBE_CONTEXT=<context>
+export OPENSANDBOX_SERVER_API_KEY="$(kubectl --context <context> -n opensandbox-system \
+  get secret opensandbox-api-key -o jsonpath='{.data.api-key}' | base64 -d)"
+
+make smoke    KUBE_CONTEXT=<context> SMOKE_IMAGE=<image>   # the server API and real sandboxes
+make netcheck KUBE_CONTEXT=<context> SMOKE_IMAGE=<image>   # who may call the server
+make check    KUBE_CONTEXT=<context>                       # RBAC and pod placement
 ```
 
-`make smoke` needs `uv` and `OPENSANDBOX_SERVER_API_KEY` in the environment. It port-forwards
-the server to `127.0.0.1:8082`, starts one sandbox and checks:
+**`make smoke`** reads the key from `OPENSANDBOX_SERVER_API_KEY` (above). It port-forwards the server to `127.0.0.1:8082`, calls the API the way the client does, and starts
+two sandboxes. It takes about two minutes and ends with `18 of 18 passed`.
 
-1. a command runs;
-2. egress to a host outside the allow-list is refused;
-3. the vault's header reaches an allowed host (`postman-echo.com` echoes it);
-4. the vault's header replaces one the sandbox sent itself;
-5. a command inside the sandbox gets `401` from the sidecar's own API (`127.0.0.1:18080`);
-6. a vault PATCH reaches the next request;
-7. a command's own `envs` are seen by that command, and not by the next one.
+| Area | Checks |
+|---|---|
+| API | `/health` answers `200` with no key; `/v1/sandboxes` answers `401` with no key and with a wrong key, `200` with the key |
+| Lifecycle | A new sandbox is `Running`; a renew moves its expiry later; a new handle connects to it by id and runs a command; a kill makes it `404`; a sandbox created with the shortest timeout (60 s) and never renewed is `404` within 90 s after its timeout |
+| Commands | An argv command runs; a command's own `envs` are seen by that command and not by the next one |
+| Egress | A host outside the allow-list is refused; a sandbox cannot reach `kubernetes.default.svc` even when its allow-list names it (NetworkPolicy `sandboxes`) |
+| Credential Vault | Its header reaches an allowed host (`postman-echo.com` echoes it) and replaces one the sandbox sent itself; a PATCH reaches the next request; a command inside the sandbox gets `401` from the sidecar's own API |
 
-The vault values are dummies. `make check` prints which namespaces the two service accounts may
-read Secrets in (the server: `opensandbox` only; the controller: none) and the node each pod
-runs on.
+The vault values are dummies. The SDK also logs a few lines while it runs (`retrying ...
+/ping ... 502` while a sandbox starts, `Sandbox ... not found` after a kill): they are expected;
+only the `PASS`/`FAIL` lines count.
+
+**`make netcheck`** runs a curl pod against `http://opensandbox-server.opensandbox-system.svc/health`
+from two namespaces: one labelled `opensandbox.io/client=true` must get `200`, one without the
+label must get no answer. By default both namespaces are made for the check and deleted after.
+`CLIENT_NS=xora-dev` runs the first pod in a real client namespace instead, which also checks
+that its pod security group may reach the server.
+
+**`make check`** prints which namespaces the two service accounts may read Secrets in (the
+server: `opensandbox` only; the controller: none) and the node each pod runs on.
+
+These prove the platform. The client's own image (its CLIs, the sidecar CA, its providers) is
+the client's check: for xora-sandbox, `RUN_OPENSANDBOX_TESTS=1 make test` in that repo, pointed
+at this server.
+
+## Upgrade and remove
+
+- Changing values: run step 4 again. A change to `configToml` replaces the server pod; running
+  sandboxes keep running (their `BatchSandbox` objects stay), but client calls fail until the
+  new pod is Ready. A change to the sandbox template ConfigMap (`k8s/manifests.yaml`) does not
+  restart the server: restart it with `kubectl -n opensandbox-system rollout restart
+  deployment/opensandbox-server`.
+- `helm uninstall opensandbox -n opensandbox-system` keeps the CRDs (`helm.sh/resource-policy:
+  keep`). Deleting the CRDs, or the namespace `opensandbox`, deletes every sandbox at once.
 
 ## What clients can count on
 
@@ -194,7 +246,7 @@ and set `OPENSANDBOX_SERVER_API_KEY` first: on kind the Secret is made from it.
 
 | Command | Does |
 |---|---|
-| `make kind-up` | `kind-cluster`, `kind-install`, `smoke`, `check` |
+| `make kind-up` | `kind-cluster`, `kind-install`, `smoke`, `netcheck`, `check` |
 | `make kind-cluster` | Cluster `osb-nonprod`: Kubernetes 1.35, three arm64 nodes (control plane, `workload: general`, `workload: sandbox` with the `NoSchedule` taint), Calico for NetworkPolicy |
 | `make kind-install` | `k8s/manifests.yaml`, the API key Secret from `.env`, then the chart with `k8s/values-kind.yaml` (Docker Hub images) |
 | `make forward` | Hold a port-forward to the server on `127.0.0.1:8081` for a client on this machine (`OPENSANDBOX_DOMAIN=127.0.0.1:8081`); Ctrl-C ends it |
@@ -220,5 +272,6 @@ k8s/manifests.yaml          what the chart does not create: namespaces, NetworkP
 k8s/chart.patch             changes to the upstream charts (RBAC)
 k8s/kind.yaml               the kind cluster
 smoke/platform_smoke.py     the platform smoke test (run by `uv`, no virtualenv to keep)
-Makefile                    deps, render, install, smoke, forward, check, charts, kind-*
+Makefile                    deps, render, install, smoke, netcheck, forward, check, charts,
+                            kind-*
 ```

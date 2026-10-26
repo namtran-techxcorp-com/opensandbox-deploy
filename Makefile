@@ -17,8 +17,10 @@ CALICO_VERSION := v3.33.0
 # it while forward runs.
 PORT := 8081
 SMOKE_PORT := 8082
+# Any image with sh and curl the nodes can pull (smoke, netcheck).
+SMOKE_IMAGE ?= curlimages/curl:8.10.1
 
-.PHONY: deps render install smoke forward check lint charts \
+.PHONY: deps render install smoke netcheck forward check lint charts \
 	kind-up kind-cluster kind-install kind-load kind-down
 
 deps:
@@ -45,6 +47,32 @@ smoke:
 	OPENSANDBOX_DOMAIN=127.0.0.1:$(SMOKE_PORT) uv run -q --no-project --python 3.11 \
 		--with opensandbox==$(OSB_VERSION) python smoke/platform_smoke.py; rc=$$?; \
 	kill $$pf; exit $$rc
+
+# The NetworkPolicy opensandbox-server, from pods in the cluster (smoke's port-forward does not
+# pass through it): /health answers a pod in CLIENT_NS and not one in a namespace without the
+# opensandbox.io/client label. CLIENT_NS defaults to a namespace made for the check; name a real
+# client namespace (xora-dev) to also check its security group. SMOKE_IMAGE must hold curl.
+CLIENT_NS ?= osb-netcheck-client
+OTHER_NS := osb-netcheck-other
+SERVER_URL := http://opensandbox-server.opensandbox-system.svc/health
+
+netcheck:
+	@if [ "$(CLIENT_NS)" = osb-netcheck-client ]; then \
+		$(KUBECTL) create namespace $(CLIENT_NS) >/dev/null 2>&1; \
+		$(KUBECTL) label namespace $(CLIENT_NS) opensandbox.io/client=true --overwrite >/dev/null; \
+	fi
+	@$(KUBECTL) create namespace $(OTHER_NS) >/dev/null 2>&1; \
+	for ns in $(CLIENT_NS) $(OTHER_NS); do \
+		code=$$($(KUBECTL) -n $$ns run osb-netcheck --rm -i --quiet --restart=Never \
+			--image=$(SMOKE_IMAGE) --command -- \
+			curl -s -m 5 -o /dev/null -w '%{http_code}' $(SERVER_URL) 2>/dev/null | tail -c 3); \
+		if [ $$ns = $(OTHER_NS) ]; then want=000; else want=200; fi; \
+		if [ "$$code" = $$want ]; then r=PASS; else r=FAIL; fail=1; fi; \
+		echo "$$r  /health from namespace $$ns: $$code (want $$want)"; \
+	done; \
+	$(KUBECTL) delete namespace $(OTHER_NS) --wait=false >/dev/null; \
+	if [ "$(CLIENT_NS)" = osb-netcheck-client ]; then $(KUBECTL) delete namespace $(CLIENT_NS) --wait=false >/dev/null; fi; \
+	exit $${fail:-0}
 
 # The server for a client on this machine (xora-sandbox): OPENSANDBOX_DOMAIN=127.0.0.1:$(PORT).
 forward:
@@ -74,7 +102,7 @@ charts:
 	patch -s -d $(RUN_DIR) -p1 < k8s/chart.patch
 	rm -rf charts && mv $(RUN_DIR)/charts charts
 
-kind-up: kind-cluster kind-install smoke check
+kind-up: kind-cluster kind-install smoke netcheck check
 
 kind-cluster:
 	@kind get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || kind create cluster --config k8s/kind.yaml
